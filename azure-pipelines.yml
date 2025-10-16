@@ -4,55 +4,23 @@ trigger:
       - main
 
 variables:
-  # Update with your actual names
-  azureServiceConnection: 'azure-connection'   # Service connection to Azure
-  dockerServiceConnection: 'acr-connection'    # Docker Registry (ACR) connection
+  azureServiceConnection: 'azure-connection'
+  dockerServiceConnection: 'acr-connection'
   resourceGroup: 'rg-aks-argocd'
   location: 'East US'
   acrName: 'myacrshamail'
-  aksName: 'aks-argocd-demo'
   imageName: 'node-api'
   tag: '$(Build.BuildId)'
-  terraformVersion: '1.9.5'
 
 pool:
   vmImage: 'ubuntu-latest'
 
 stages:
 # ---------------------------------------------------------------------------
-# 1. Terraform Stage — Provision Infra (ACR + AKS)
-# ---------------------------------------------------------------------------
-# - stage: Terraform
-#   displayName: "Terraform - Provision Infra"
-#   jobs:
-#     - job: Terraform
-#       displayName: "Terraform Init, Plan, Apply"
-#       steps:
-#         - checkout: self
-
-#         - task: UsePythonVersion@0
-#           inputs:
-#             versionSpec: '3.x'
-#           displayName: 'Use Python 3'
-
-#         - task: TerraformInstaller@1
-#           displayName: 'Install Terraform'
-#           inputs:
-#             terraformVersion: $(terraformVersion)
-
-#         - script: |
-#             cd infra
-#             terraform init -upgrade
-#             terraform plan -out=tfplan
-#             terraform apply -auto-approve tfplan
-#           displayName: 'Terraform Apply Infra'
-
-# ---------------------------------------------------------------------------
-# 2. Build + Push Docker Image to ACR
+# 1. Build + Push Docker Image to ACR
 # ---------------------------------------------------------------------------
 - stage: Build
   displayName: "Build and Push Docker Image"
-  # dependsOn: Terraform
   jobs:
     - job: DockerBuild
       displayName: "Build and Push Image to ACR"
@@ -67,14 +35,14 @@ stages:
         - script: |
             cd app
             npm install
-            echo "Node.js dependencies installed"
+            echo "✅ Node.js dependencies installed"
           displayName: 'Install Node Dependencies'
 
         - task: Docker@2
           displayName: 'Build and Push Docker Image'
           inputs:
             command: 'buildAndPush'
-            repository: '$(acrName).azurecr.io/$(imageName)'
+            repository: '$(imageName)'
             dockerfile: 'app/Dockerfile'
             containerRegistry: '$(dockerServiceConnection)'
             tags: |
@@ -82,7 +50,7 @@ stages:
               $(tag)
 
 # ---------------------------------------------------------------------------
-# 3. Update Kubernetes Deployment YAML (GitOps trigger for ArgoCD)
+# 2. Update Kubernetes Deployment YAML (GitOps trigger for ArgoCD)
 # ---------------------------------------------------------------------------
 - stage: UpdateManifest
   displayName: "Update Kubernetes Manifests"
@@ -93,39 +61,47 @@ stages:
       steps:
         - checkout: self
           persistCredentials: true
+          clean: true
+          fetchDepth: 0
 
-        - script: |
-            echo "Updating deployment.yaml with new tag $(tag)"
-            sed -i "s|image: $(acrName).azurecr.io/$(imageName):.*|image: $(acrName).azurecr.io/$(imageName):$(tag)|" app/k8s/deployment.yaml
-
-            echo "Commit and push changes"
-            git config user.email "devops@yourcompany.com"
-            git config user.name "Azure DevOps"
-            git add app/k8s/deployment.yaml
-            git commit -m "Update image tag to $(tag)"
-            git push origin main
+        - task: Bash@3
           displayName: "Update and Push Manifest"
+          inputs:
+            targetType: 'inline'
+            script: |
+              set -e
 
-# ---------------------------------------------------------------------------
-# 4. Optional Stage: Deploy Directly to AKS (if you want CD in pipeline)
-# ---------------------------------------------------------------------------
-# Normally ArgoCD handles this automatically.
-# Uncomment below if you want pipeline-driven deployment too.
+              echo "🧩 Configuring Git user"
+              git config user.email "devops@yourcompany.com"
+              git config user.name "Azure DevOps Pipeline"
 
-# - stage: Deploy
-#   displayName: "Deploy to AKS"
-#   dependsOn: UpdateManifest
-#   jobs:
-#     - job: DeployToAKS
-#       displayName: "Deploy to AKS"
-#       steps:
-#         - checkout: self
-#         - task: AzureCLI@2
-#           inputs:
-#             azureSubscription: '$(azureServiceConnection)'
-#             scriptType: bash
-#             scriptLocation: inlineScript
-#             inlineScript: |
-#               az aks get-credentials --resource-group $(resourceGroup) --name $(aksName) --overwrite-existing
-#               kubectl apply -f app/k8s/
-#           displayName: 'Apply Kubernetes Manifests'
+              echo "📂 Ensuring we're on the correct branch: $BUILD_SOURCEBRANCHNAME"
+              git checkout $BUILD_SOURCEBRANCHNAME 2>/dev/null || git checkout -b $BUILD_SOURCEBRANCHNAME
+              git pull origin $BUILD_SOURCEBRANCHNAME || echo "No remote changes to pull"
+
+              echo "🔧 Updating deployment.yaml with new tag $(tag)"
+              sed -i "s|image: .*$(imageName):.*|image: $(acrName).azurecr.io/$(imageName):$(tag)|" app/k8s/deployment.yaml
+
+              # Verify the change was made
+              if grep -q "$(acrName).azurecr.io/$(imageName):$(tag)" app/k8s/deployment.yaml; then
+                echo "✅ Image tag updated successfully"
+                cat app/k8s/deployment.yaml | grep "image:"
+              else
+                echo "❌ Failed to update image tag"
+                exit 1
+              fi
+
+              echo "💾 Checking for changes"
+              if git diff --quiet app/k8s/deployment.yaml; then
+                echo "⚠️ No changes detected in deployment.yaml"
+                exit 0
+              fi
+
+              echo "📝 Staging and committing changes"
+              git add app/k8s/deployment.yaml
+              git commit -m "chore: update image tag to $(tag) [skip ci]"
+
+              echo "🚀 Pushing changes to $BUILD_SOURCEBRANCHNAME"
+              git push origin HEAD:$BUILD_SOURCEBRANCHNAME
+
+              echo "✅ Manifest updated and pushed successfully"

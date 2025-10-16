@@ -104,64 +104,10 @@ Now ArgoCD will deploy whatever’s in `app/k8s/` automatically.
 
 ---
 
-## ⚙️ Step 5: Azure DevOps CI Pipeline
+## ⚙️ Step 5: Azure DevOps CI Pipeline and ArgoCD
 
-**azure-pipelines.yml**
-
-```yaml
-trigger:
-  branches:
-    include:
-      - main
-
-variables:
-  acrName: "myacrshamail"
-  imageName: "node-api"
-  tag: "$(Build.BuildId)"
-
-pool:
-  vmImage: "ubuntu-latest"
-
-steps:
-  - task: NodeTool@0
-    inputs:
-      versionSpec: "20.x"
-
-  - script: |
-      cd app
-      npm install
-      npm test || echo "No tests configured"
-    displayName: "Install Dependencies"
-
-  - task: Docker@2
-    displayName: "Build and Push Image"
-    inputs:
-      command: "buildAndPush"
-      repository: "$(acrName).azurecr.io/$(imageName)"
-      dockerfile: "app/Dockerfile"
-      containerRegistry: "$(acrName)"
-      tags: |
-        latest
-        $(tag)
-
-  - script: |
-      echo "Updating deployment.yaml with new tag $(tag)"
-      sed -i "s|image: $(acrName).azurecr.io/$(imageName):.*|image: $(acrName).azurecr.io/$(imageName):$(tag)|" app/k8s/deployment.yaml
-    displayName: "Update Kubernetes Deployment Tag"
-
-  - task: Bash@3
-    displayName: "Commit and Push Manifest Update"
-    inputs:
-      targetType: "inline"
-      script: |
-        git config user.email "devops@yourcompany.com"
-        git config user.name "Azure DevOps"
-        git add app/k8s/deployment.yaml
-        git commit -m "Update image tag to $(tag)"
-        git push origin main
-```
-
-> 🧩 Argo CD will detect the change in the GitHub repo (new image tag) and automatically deploy the new version.
+The azure piple code should build the image and push to the acr repo and update the maniufect files to that we have the connect images mentioned in the manifest files.
+Then make sure to create an app in argo cd , connect that to the azure repo.Argo CD will detect the change in the GitHub repo (new image tag) and automatically deploy the new version.
 
 ---
 
