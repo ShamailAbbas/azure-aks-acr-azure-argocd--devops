@@ -4,47 +4,128 @@ trigger:
       - main
 
 variables:
+  # Update with your actual names
+  azureServiceConnection: 'azure-connection'   # Service connection to Azure
+  dockerServiceConnection: 'acr-connection'    # Docker Registry (ACR) connection
+  resourceGroup: 'rg-aks-argocd'
+  location: 'East US'
   acrName: 'myacrshamail'
+  aksName: 'aks-argocd-demo'
   imageName: 'node-api'
   tag: '$(Build.BuildId)'
+  terraformVersion: '1.9.5'
 
 pool:
   vmImage: 'ubuntu-latest'
 
-steps:
-  - task: NodeTool@0
-    inputs:
-      versionSpec: '20.x'
+stages:
+# ---------------------------------------------------------------------------
+# 1. Terraform Stage — Provision Infra (ACR + AKS)
+# ---------------------------------------------------------------------------
+# - stage: Terraform
+#   displayName: "Terraform - Provision Infra"
+#   jobs:
+#     - job: Terraform
+#       displayName: "Terraform Init, Plan, Apply"
+#       steps:
+#         - checkout: self
 
-  - script: |
-      cd app
-      npm install
-      npm test || echo "No tests configured"
-    displayName: 'Install Dependencies'
+#         - task: UsePythonVersion@0
+#           inputs:
+#             versionSpec: '3.x'
+#           displayName: 'Use Python 3'
 
-  - task: Docker@2
-    displayName: 'Build and Push Image'
-    inputs:
-      command: 'buildAndPush'
-      repository: '$(acrName).azurecr.io/$(imageName)'
-      dockerfile: 'app/Dockerfile'
-      containerRegistry: '$(acrName)'
-      tags: |
-        latest
-        $(tag)
+#         - task: TerraformInstaller@1
+#           displayName: 'Install Terraform'
+#           inputs:
+#             terraformVersion: $(terraformVersion)
 
-  - script: |
-      echo "Updating deployment.yaml with new tag $(tag)"
-      sed -i "s|image: $(acrName).azurecr.io/$(imageName):.*|image: $(acrName).azurecr.io/$(imageName):$(tag)|" app/k8s/deployment.yaml
-    displayName: 'Update Kubernetes Deployment Tag'
+#         - script: |
+#             cd infra
+#             terraform init -upgrade
+#             terraform plan -out=tfplan
+#             terraform apply -auto-approve tfplan
+#           displayName: 'Terraform Apply Infra'
 
-  - task: Bash@3
-    displayName: 'Commit and Push Manifest Update'
-    inputs:
-      targetType: 'inline'
-      script: |
-        git config user.email "devops@yourcompany.com"
-        git config user.name "Azure DevOps"
-        git add app/k8s/deployment.yaml
-        git commit -m "Update image tag to $(tag)"
-        git push origin main
+# ---------------------------------------------------------------------------
+# 2. Build + Push Docker Image to ACR
+# ---------------------------------------------------------------------------
+- stage: Build
+  displayName: "Build and Push Docker Image"
+  dependsOn: Terraform
+  jobs:
+    - job: DockerBuild
+      displayName: "Build and Push Image to ACR"
+      steps:
+        - checkout: self
+
+        - task: NodeTool@0
+          inputs:
+            versionSpec: '20.x'
+          displayName: 'Use Node.js 20'
+
+        - script: |
+            cd app
+            npm install
+            echo "Node.js dependencies installed"
+          displayName: 'Install Node Dependencies'
+
+        - task: Docker@2
+          displayName: 'Build and Push Docker Image'
+          inputs:
+            command: 'buildAndPush'
+            repository: '$(acrName).azurecr.io/$(imageName)'
+            dockerfile: 'app/Dockerfile'
+            containerRegistry: '$(dockerServiceConnection)'
+            tags: |
+              latest
+              $(tag)
+
+# ---------------------------------------------------------------------------
+# 3. Update Kubernetes Deployment YAML (GitOps trigger for ArgoCD)
+# ---------------------------------------------------------------------------
+- stage: UpdateManifest
+  displayName: "Update Kubernetes Manifests"
+  dependsOn: Build
+  jobs:
+    - job: UpdateManifest
+      displayName: "Commit updated image tag"
+      steps:
+        - checkout: self
+          persistCredentials: true
+
+        - script: |
+            echo "Updating deployment.yaml with new tag $(tag)"
+            sed -i "s|image: $(acrName).azurecr.io/$(imageName):.*|image: $(acrName).azurecr.io/$(imageName):$(tag)|" app/k8s/deployment.yaml
+
+            echo "Commit and push changes"
+            git config user.email "devops@yourcompany.com"
+            git config user.name "Azure DevOps"
+            git add app/k8s/deployment.yaml
+            git commit -m "Update image tag to $(tag)"
+            git push origin main
+          displayName: "Update and Push Manifest"
+
+# ---------------------------------------------------------------------------
+# 4. Optional Stage: Deploy Directly to AKS (if you want CD in pipeline)
+# ---------------------------------------------------------------------------
+# Normally ArgoCD handles this automatically.
+# Uncomment below if you want pipeline-driven deployment too.
+
+# - stage: Deploy
+#   displayName: "Deploy to AKS"
+#   dependsOn: UpdateManifest
+#   jobs:
+#     - job: DeployToAKS
+#       displayName: "Deploy to AKS"
+#       steps:
+#         - checkout: self
+#         - task: AzureCLI@2
+#           inputs:
+#             azureSubscription: '$(azureServiceConnection)'
+#             scriptType: bash
+#             scriptLocation: inlineScript
+#             inlineScript: |
+#               az aks get-credentials --resource-group $(resourceGroup) --name $(aksName) --overwrite-existing
+#               kubectl apply -f app/k8s/
+#           displayName: 'Apply Kubernetes Manifests'
