@@ -52,7 +52,7 @@ stages:
 # ---------------------------------------------------------------------------
 - stage: Build
   displayName: "Build and Push Docker Image"
-  dependsOn: Terraform
+  # dependsOn: Terraform
   jobs:
     - job: DockerBuild
       displayName: "Build and Push Image to ACR"
